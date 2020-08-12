@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
@@ -43,34 +42,31 @@ func main() {
 	panic(r.Run(listenaddr))
 }
 
-func gitlabCallbackRouter(gitlab *gitlab.Client, c *gin.Context) {
-	switch c.Request.Header.Get(HEADER_GITLAB_EVENT) {
-	case HEADER_TYPE_MERGE_REQUEST:
-		mergeRequest(gitlab, c)
+func gitlabCallbackRouter(gl *gitlab.Client, c *gin.Context) {
+	b, err := ioutil.ReadAll(c.Request.Body)
+	if err != nil {
+		logrus.Errorf("Failed to read request body '%w'", err)
+		http.Error(c.Writer, http.StatusText(http.StatusNoContent), http.StatusNoContent)
+	}
+
+	webhook, err := gitlab.ParseWebhook(gitlab.WebhookEventType(c.Request), b)
+	if err != nil {
+		logrus.Errorf("Failed to parse gitlab webhook with type '%s', '%w'", c.Request.Header.Get(HEADER_GITLAB_EVENT), err)
+		http.Error(c.Writer, http.StatusText(http.StatusNoContent), http.StatusNoContent)
+	}
+
+	switch wh := webhook.(type) {
+	case *gitlab.MergeEvent:  // actually a Merge Request event...
+		c.Writer.WriteHeader(http.StatusOK)
+		mergeRequest(gl, wh)
 	default:
 		logrus.Errorf("Not handling event '%s', because we don't care about it", c.Request.Header.Get(HEADER_GITLAB_EVENT))
 		http.Error(c.Writer, http.StatusText(http.StatusNoContent), http.StatusNoContent)
-		return
 	}
 }
 
 // mergeRequest receives an MR,
-func mergeRequest(gl *gitlab.Client, c *gin.Context) {
-	mr := MRCallback{}
-	b, err := ioutil.ReadAll(c.Request.Body)
-	if err != nil {
-		logrus.WithError(err).Error("failed to read MR callback")
-		http.Error(c.Writer, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
-		return
-	}
-	err = json.Unmarshal(b, &mr)
-	if err != nil {
-		logrus.WithError(err).Error("failed to unmarshal MR callback")
-		http.Error(c.Writer, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
-		return
-	}
-
-	c.Writer.WriteHeader(http.StatusOK)
+func mergeRequest(gl *gitlab.Client, mr *gitlab.MergeEvent) {
 
 	logrus.SetLevel(logrus.DebugLevel)
 
@@ -85,11 +81,6 @@ func mergeRequest(gl *gitlab.Client, c *gin.Context) {
 
 	authorID := mr.ObjectAttributes.AuthorID
 	user, _, err := gl.Users.GetUser(authorID)
-	if err != nil {
-		logrus.WithError(err).Errorf("failed to get author of MR %s, with user ID %d", url, authorID)
-		http.Error(c.Writer, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
-		return
-	}
 
 	author = user.Name
 
@@ -135,7 +126,7 @@ func mergeRequest(gl *gitlab.Client, c *gin.Context) {
 // if someone is assigned and is not a maintainer (i.e. the requester self-assigned),
 // then it is reassigned to a random maintainer.  If an existing maintainer is already assigned, they remain in place.
 // Returns the maintainer's Name, and any errors encountered
-func maybeAssignMaintainer(gl *gitlab.Client, mr MRCallback) (string, error) {
+func maybeAssignMaintainer(gl *gitlab.Client, mr *gitlab.MergeEvent) (string, error) {
 	maintainers, err := getProjectMaintainers(gl, mr.Project.ID)
 	if err != nil {
 		return "", err
@@ -146,7 +137,7 @@ func maybeAssignMaintainer(gl *gitlab.Client, mr MRCallback) (string, error) {
 	maintainer := maintainers[rand.Intn(len(maintainers))]
 
 	if mr.ObjectAttributes.AssigneeID == 0 {
-		_, _, err = gl.MergeRequests.UpdateMergeRequest(mr.Project.ID, mr.ObjectAttributes.Iid, &gitlab.UpdateMergeRequestOptions{
+		_, _, err = gl.MergeRequests.UpdateMergeRequest(mr.Project.ID, mr.ObjectAttributes.IID, &gitlab.UpdateMergeRequestOptions{
 			AssigneeID: &maintainer.ID,
 		})
 		return maintainer.Name, err
@@ -160,7 +151,7 @@ func maybeAssignMaintainer(gl *gitlab.Client, mr MRCallback) (string, error) {
 		}
 		if !found {
 			// someone must have assigned it to themselves, or the maintainer was hit by a bus.  reassign
-			_, _, err = gl.MergeRequests.UpdateMergeRequest(mr.Project.ID, mr.ObjectAttributes.Iid, &gitlab.UpdateMergeRequestOptions{
+			_, _, err = gl.MergeRequests.UpdateMergeRequest(mr.Project.ID, mr.ObjectAttributes.IID, &gitlab.UpdateMergeRequestOptions{
 				AssigneeID: &maintainer.ID,
 			})
 			return maintainer.Name, err
