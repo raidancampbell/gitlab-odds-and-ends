@@ -72,9 +72,11 @@ func mergeRequest(gl *gitlab.Client, c *gin.Context) {
 
 	c.Writer.WriteHeader(http.StatusOK)
 
+	logrus.SetLevel(logrus.DebugLevel)
+
 	logrus.Debugf("processing merge request webhook %+v", mr)
 
-	var repo, author, assignee, url string
+	var repo, author, url string
 	var isWIP bool
 
 	url = mr.ObjectAttributes.URL
@@ -97,7 +99,12 @@ func mergeRequest(gl *gitlab.Client, c *gin.Context) {
 
 	switch mr.ObjectAttributes.Action {
 	case "open":
+		// assign
+		// notify
+		// save notification thread ID for any updates
 	case "update":
+		// check if approved
+		// if approved,
 	case "approved":
 	case "merge":
 	case "unapproved":
@@ -105,7 +112,7 @@ func mergeRequest(gl *gitlab.Client, c *gin.Context) {
 	case "reopen":
 	}
 
-	err = assignMaintainer(err, gl, mr)
+	assignee, err := maybeAssignMaintainer(gl, mr)
 	if err != nil {
 		logrus.WithError(err).Error("Failed to assign maintainer to merge request")
 		return
@@ -123,18 +130,26 @@ func mergeRequest(gl *gitlab.Client, c *gin.Context) {
 	// TODO: send notification
 }
 
-func assignMaintainer(err error, gl *gitlab.Client, mr MRCallback) error {
+// maybeAssignMaintainer will ensure the given MR has a maintainer assigned to it
+// if no maintainer is assigned, a maintainer/owner from the target repository is chosen at random and assigned
+// if someone is assigned and is not a maintainer (i.e. the requester self-assigned),
+// then it is reassigned to a random maintainer.  If an existing maintainer is already assigned, they remain in place.
+// Returns the maintainer's Name, and any errors encountered
+func maybeAssignMaintainer(gl *gitlab.Client, mr MRCallback) (string, error) {
 	maintainers, err := getProjectMaintainers(gl, mr.Project.ID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if len(maintainers) == 0 {
-		return fmt.Errorf("no maintainers for repository, cannot assign a maintainer")
+		return "", fmt.Errorf("no maintainers for repository, cannot assign a maintainer")
 	}
+	maintainer := maintainers[rand.Intn(len(maintainers))]
+
 	if mr.ObjectAttributes.AssigneeID == 0 {
 		_, _, err = gl.MergeRequests.UpdateMergeRequest(mr.Project.ID, mr.ObjectAttributes.Iid, &gitlab.UpdateMergeRequestOptions{
-			AssigneeID: &maintainers[rand.Intn(len(maintainers))].ID,
+			AssigneeID: &maintainer.ID,
 		})
+		return maintainer.Name, err
 	} else {
 		found := false
 		for _, maintainer := range maintainers {
@@ -146,13 +161,16 @@ func assignMaintainer(err error, gl *gitlab.Client, mr MRCallback) error {
 		if !found {
 			// someone must have assigned it to themselves, or the maintainer was hit by a bus.  reassign
 			_, _, err = gl.MergeRequests.UpdateMergeRequest(mr.Project.ID, mr.ObjectAttributes.Iid, &gitlab.UpdateMergeRequestOptions{
-				AssigneeID: &maintainers[rand.Intn(len(maintainers))].ID,
+				AssigneeID: &maintainer.ID,
 			})
+			return maintainer.Name, err
 		}
 	}
-	return err
+	//TODO: this is blank
+	return mr.ObjectAttributes.Assignee.Name, err
 }
 
+// getProjectMaintainers lists the maintainers of the given project.  This does not include inherited permissions.
 func getProjectMaintainers(gl *gitlab.Client, id int) (maintainers []*gitlab.ProjectMember, err error) {
 	// not inherited.  if you want inherited, slap on a `/all` at the end
 
