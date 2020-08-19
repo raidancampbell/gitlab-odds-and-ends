@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
@@ -47,7 +48,7 @@ func main() {
 		rtm = slk.NewRTM()
 		go rtm.ManageConnection()
 	} else {
-		// TODO: build a noop copy of RTM, and wrap RTM in an interface
+		// TODO: build a no-op copy of RTM, and wrap RTM in an interface
 		logrus.Warn("no slack token set, slack messaging disabled")
 	}
 
@@ -109,19 +110,45 @@ func (bot bot) mergeRequest(mr *gitlab.MergeEvent, slackChans []string) {
 			return
 		}
 
+		_ = ensureTotalMaintainers(bot.gl, mr, 2)
+
 		// notify
 		bot.notifyNewMR(mr, assignee, slackChans)
 
 		// TODO: save notification thread ID for any updates
 	case MR_ACTION_UPDATED:
-		// check if approved
-		// if approved,
+		// nice-to-have: if new commits added to an approved MR, remove approvals
+		// this may not be possible with API keys scoped to users (i.e. I can't remove another user's approval)
+
+		// nice-to-have: notify when an MR is no longer in WIP
 	case MR_ACTION_APPROVED:
 	case MR_ACTION_MERGED:
 	case MR_ACTION_UNAPPROVED:
 	case MR_ACTION_CLOSED:
 	}
 
+}
+
+// ensureTotalMaintainers reviews the current participants for maintainers.
+//If below the given `totalReviewers` then additional maintainers are tagged to reach the desired amount
+func ensureTotalMaintainers(gl *gitlab.Client, mr *gitlab.MergeEvent, totalReviewers int) error {
+	// who all is participating in this review
+
+	// get the maintainers for this project
+
+	// how many of the participants are maintainers
+
+	// while we're below the desired number of reviewers
+	// roll a random reviewer
+	// if the reviewer was already rolled, OR is already a participant, retry(continue)
+	// else, add them to a list of "maintainers to tag"
+
+	// for each user in the "maintainers to tag" list
+	// grab their username, append it to the comment string
+
+	// send the comment string to gitlab, which tags the maintainers and makes them participants
+
+	return errors.New("unimplemented")
 }
 
 func (bot bot) notifyNewMR(mr *gitlab.MergeEvent, assignee string, slackChans []string) {
