@@ -125,22 +125,22 @@ func (bot bot) mergeRequest(mr *gitlab.MergeEvent, slackChans []string) {
 }
 
 func (bot bot) notifyNewMR(mr *gitlab.MergeEvent, assignee string, slackChans []string) {
+	author := "unknown(see logs for error)"
 	user, _, err := bot.gl.Users.GetUser(mr.ObjectAttributes.AuthorID)
 	if err != nil {
 		logrus.WithError(err).Error("unable to see who opened the merge request. continuing...")
+	} else {
+		author = user.Name
 	}
-	author := user.Name
 
 	url := mr.ObjectAttributes.URL
 	repo := mr.ObjectAttributes.Target.Name
-	isWIP := mr.ObjectAttributes.WorkInProgress
-
-	var msg string
-	if isWIP {
-		msg = fmt.Sprintf("New WIP merge request in `%s` from %s has been assigned to %s.  See %s for details.", repo, author, assignee, url)
-	} else {
-		msg = fmt.Sprintf("New merge request in `%s` from %s has been assigned to %s.  See %s for details.", repo, author, assignee, url)
+	wipStr := ""
+	if mr.ObjectAttributes.WorkInProgress {
+		wipStr = " WIP"
 	}
+
+	msg := fmt.Sprintf("New%s merge request in `%s` from %s has been assigned to %s.  See %s for details.", wipStr, repo, author, assignee, url)
 	logrus.Info(msg)
 
 	if bot.rtm != nil {
