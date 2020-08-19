@@ -34,8 +34,17 @@ type bot struct {
 	gl  *gitlab.Client
 }
 
+// usage:
+// set SLACK_TOKEN_ENV_VAR to a slack token capable of interacting with the RTM API.  This is nontrivial.
+//the best method I could find was here: https://github.com/erroneousboat/slack-term/wiki#running-slack-term-without-legacy-tokens
+//visit https://my.slack.com/customize and execute "TS.boot_data.api_token" in the console.  The responded xoxs-.... token will post as you.
+// set GITLAB_TOKEN to a gitlab personal access token.  I gave mine all scopes because I'm still writing this thing and don't know what it wants.
+const GITLAB_BASE_URL = "http://nuc.sinkhole.raidancampbell.com:2080/api/v4"
+// edit that ^^^ to your gitlab URL.  Or maybe an env var.
+// "enroll" a repo with this by configuring its webhook to hit this code.  As it stands this code listens on `/gitlab/callback`
+//Additionally the webhook should send the desired slack channel in the `slack-channel` query parameter, for example `/gitlab/callback?slack-channel=C0123456789`
 func main() {
-	gl, err := gitlab.NewClient(os.Getenv(GITLAB_TOKEN_ENV_VAR), gitlab.WithBaseURL("http://nuc.sinkhole.raidancampbell.com:2080/api/v4"))
+	gl, err := gitlab.NewClient(os.Getenv(GITLAB_TOKEN_ENV_VAR), gitlab.WithBaseURL(GITLAB_BASE_URL))
 	if err != nil {
 		log.Fatalf("Failed to create client: %v", err)
 	}
@@ -198,7 +207,7 @@ func maybeAssignMaintainer(gl *gitlab.Client, mr *gitlab.MergeEvent) (string, er
 			AssigneeID: &maintainer.ID,
 		})
 		return maintainer.Name, err
-	} else { // MR is assigned to someone
+	} else {                                     // MR is assigned to someone
 		for _, maintainer := range maintainers { // if it's currently assigned to a maintainer, great!
 			if maintainer.ID == mr.ObjectAttributes.AssigneeID {
 				// due to some weirdness (or error on my side) the MR callback doesn't list the assignee's name. get it.
