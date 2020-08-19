@@ -30,7 +30,7 @@ const (
 
 type bot struct {
 	rtm *slack.RTM
-	gl *gitlab.Client
+	gl  *gitlab.Client
 }
 
 func main() {
@@ -52,7 +52,7 @@ func main() {
 	}
 
 	r := gin.Default()
-	b := bot{rtm,gl}
+	b := bot{rtm, gl}
 	r.POST("/gitlab/callback", b.gitlabCallbackRouter)
 
 	listenaddr := ":8080"
@@ -124,7 +124,7 @@ func (bot bot) mergeRequest(mr *gitlab.MergeEvent, slackChans []string) {
 
 }
 
-func (bot bot) notifyNewMR(mr *gitlab.MergeEvent,assignee string, slackChans []string) {
+func (bot bot) notifyNewMR(mr *gitlab.MergeEvent, assignee string, slackChans []string) {
 	user, _, err := bot.gl.Users.GetUser(mr.ObjectAttributes.AuthorID)
 	if err != nil {
 		logrus.WithError(err).Error("unable to see who opened the merge request. continuing...")
@@ -165,32 +165,29 @@ func maybeAssignMaintainer(gl *gitlab.Client, mr *gitlab.MergeEvent) (string, er
 	}
 	maintainer := maintainers[rand.Intn(len(maintainers))]
 
-	// not assigned
+	// not assigned to anyone. give it the randomly assigned MR
 	if mr.ObjectAttributes.AssigneeID == 0 {
 		_, _, err = gl.MergeRequests.UpdateMergeRequest(mr.Project.ID, mr.ObjectAttributes.IID, &gitlab.UpdateMergeRequestOptions{
 			AssigneeID: &maintainer.ID,
 		})
 		return maintainer.Name, err
-	} else {
-		found := false
-		for _, maintainer := range maintainers {
+	} else { // MR is assigned to someone
+		for _, maintainer := range maintainers { // if it's currently assigned to a maintainer, great!
 			if maintainer.ID == mr.ObjectAttributes.AssigneeID {
-				found = true
-				break
+				// due to some weirdness (or error on my side) the MR callback doesn't list the assignee's name. get it.
+				user, _, err := gl.Users.GetUser(mr.ObjectAttributes.AssigneeID)
+				if err != nil {
+					return "", err
+				}
+				return user.Name, nil
 			}
 		}
-		if !found {
-			// someone must have assigned it to themselves, or the maintainer was hit by a bus.  reassign
-			_, _, err = gl.MergeRequests.UpdateMergeRequest(mr.Project.ID, mr.ObjectAttributes.IID, &gitlab.UpdateMergeRequestOptions{
-				AssigneeID: &maintainer.ID,
-			})
-			return maintainer.Name, err
-		} else {
-			return maintainer.Name, err
-		}
+		// otherwise it should be reassigned to a maintainer
+		_, _, err = gl.MergeRequests.UpdateMergeRequest(mr.Project.ID, mr.ObjectAttributes.IID, &gitlab.UpdateMergeRequestOptions{
+			AssigneeID: &maintainer.ID,
+		})
+		return maintainer.Name, err
 	}
-	//TODO: this is blank
-	return mr.ObjectAttributes.Assignee.Name, err
 }
 
 // getProjectMaintainers lists the maintainers of the given project.  This does not include inherited permissions.
