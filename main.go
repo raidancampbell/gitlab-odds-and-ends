@@ -10,46 +10,39 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"net/http/httputil"
 	"os"
 )
 
 const (
-	SLACK_TOKEN_ENV_VAR  = "SLACK_TOKEN"
-	GITLAB_TOKEN_ENV_VAR = "GITLAB_TOKEN"
-	MR_ACTION_OPENED     = "open"
-	MR_ACTION_UPDATED    = "update"
-	MR_ACTION_APPROVED   = "approved"
-	MR_ACTION_MERGED     = "merge"
-	MR_ACTION_UNAPPROVED = "unapproved"
-	MR_ACTION_CLOSED     = "close"
-	MR_ACTION_REOPENED   = "reopen"
-	HEADER_GITLAB_EVENT  = "X-Gitlab-Event"
+	SLACK_TOKEN_ENV_VAR              = "SLACK_TOKEN"
+	GITLAB_TOKEN_ENV_VAR             = "GITLAB_TOKEN"
+	GITLAB_SLACK_CHANNEL_QUERY_PARAM = "slack-channel"
+	MR_ACTION_OPENED                 = "open"
+	MR_ACTION_UPDATED                = "update"
+	MR_ACTION_APPROVED               = "approved"
+	MR_ACTION_MERGED                 = "merge"
+	MR_ACTION_UNAPPROVED             = "unapproved"
+	MR_ACTION_CLOSED                 = "close"
+	MR_ACTION_REOPENED               = "reopen"
+	HEADER_GITLAB_EVENT              = "X-Gitlab-Event"
 )
 
-// gitlab project ID to slack channel map
-// anytime you register this webhook to another repo,
-// a mapping should be added here
-var repoSlackChannelMapping = map[int]string{
-	1: "C1234567890",
-	2: "C1234567890",
-	3: "C1234567890",
-}
-
-func HandlerWrapper(gitlab *gitlab.Client, rtm *slack.RTM, f func(gitlab *gitlab.Client, rtm *slack.RTM, c *gin.Context)) func(c *gin.Context) {
-	return func(c *gin.Context) {
-		f(gitlab, rtm, c)
-	}
+type bot struct {
+	rtm *slack.RTM
+	gl *gitlab.Client
 }
 
 func main() {
-	git, err := gitlab.NewClient(os.Getenv(GITLAB_TOKEN_ENV_VAR), gitlab.WithBaseURL("http://nuc.sinkhole.raidancampbell.com:2080/api/v4"))
+	gl, err := gitlab.NewClient(os.Getenv(GITLAB_TOKEN_ENV_VAR), gitlab.WithBaseURL("http://nuc.sinkhole.raidancampbell.com:2080/api/v4"))
 	if err != nil {
 		log.Fatalf("Failed to create client: %v", err)
 	}
 
 	var rtm = new(slack.RTM)
 	if os.Getenv(SLACK_TOKEN_ENV_VAR) != "" {
-		slk := slack.New(os.Getenv(SLACK_TOKEN_ENV_VAR))
+		slk := slack.New(os.Getenv(SLACK_TOKEN_ENV_VAR), slack.OptionDebug(true),
+			slack.OptionLog(log.New(os.Stdout, "slack-bot: ", log.Lshortfile|log.LstdFlags)), )
 
 		rtm = slk.NewRTM()
 		go rtm.ManageConnection()
@@ -59,30 +52,37 @@ func main() {
 	}
 
 	r := gin.Default()
-	r.POST("/gitlab/callback", HandlerWrapper(git, rtm, gitlabCallbackRouter))
+	b := bot{rtm,gl}
+	r.POST("/gitlab/callback", b.gitlabCallbackRouter)
 
 	listenaddr := ":8080"
 	logrus.Info("listening on " + listenaddr)
 	panic(r.Run(listenaddr))
 }
 
-func gitlabCallbackRouter(gl *gitlab.Client, rtm *slack.RTM, c *gin.Context) {
+func (bot bot) gitlabCallbackRouter(c *gin.Context) {
 	b, err := ioutil.ReadAll(c.Request.Body)
 	if err != nil {
 		logrus.Errorf("Failed to read request body '%w'", err)
-		http.Error(c.Writer, http.StatusText(http.StatusNoContent), http.StatusNoContent)
+		http.Error(c.Writer, http.StatusText(http.StatusOK), http.StatusOK)
+	}
+	slackChan := c.Request.URL.Query()[GITLAB_SLACK_CHANNEL_QUERY_PARAM]
+	if slackChan != nil {
+		bodyBytes, _ := httputil.DumpRequest(c.Request, true)
+		logrus.Errorf("Failed to read %s URL parameter from callback request %s", GITLAB_SLACK_CHANNEL_QUERY_PARAM, string(bodyBytes))
+		http.Error(c.Writer, http.StatusText(http.StatusOK), http.StatusOK)
 	}
 
 	webhook, err := gitlab.ParseWebhook(gitlab.WebhookEventType(c.Request), b)
 	if err != nil {
 		logrus.Errorf("Failed to parse gitlab webhook with type '%s', '%w'", c.Request.Header.Get(HEADER_GITLAB_EVENT), err)
-		http.Error(c.Writer, http.StatusText(http.StatusNoContent), http.StatusNoContent)
+		http.Error(c.Writer, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 	}
 
 	switch wh := webhook.(type) {
 	case *gitlab.MergeEvent: // actually a Merge Request event...
 		c.Writer.WriteHeader(http.StatusOK)
-		mergeRequest(gl, rtm, wh)
+		bot.mergeRequest(wh, slackChan)
 	default:
 		logrus.Errorf("Not handling event '%s', because we don't care about it", c.Request.Header.Get(HEADER_GITLAB_EVENT))
 		http.Error(c.Writer, http.StatusText(http.StatusNoContent), http.StatusNoContent)
@@ -90,7 +90,7 @@ func gitlabCallbackRouter(gl *gitlab.Client, rtm *slack.RTM, c *gin.Context) {
 }
 
 // mergeRequest receives an MR
-func mergeRequest(gl *gitlab.Client, rtm *slack.RTM, mr *gitlab.MergeEvent) {
+func (bot bot) mergeRequest(mr *gitlab.MergeEvent, slackChans []string) {
 
 	logrus.SetLevel(logrus.DebugLevel)
 
@@ -99,16 +99,18 @@ func mergeRequest(gl *gitlab.Client, rtm *slack.RTM, mr *gitlab.MergeEvent) {
 	// TODO: what are the valid states? this docs page is not accurate for MR callbacks: https://docs.gitlab.com/ce/api/events.html#action-types
 
 	switch mr.ObjectAttributes.Action {
+	case MR_ACTION_REOPENED:
+		fallthrough
 	case MR_ACTION_OPENED:
 		// assign
-		assignee, err := maybeAssignMaintainer(gl, mr)
+		assignee, err := maybeAssignMaintainer(bot.gl, mr)
 		if err != nil {
 			logrus.WithError(err).Error("Failed to assign maintainer to merge request")
 			return
 		}
 
 		// notify
-		notifyNewMR(mr, err, gl, assignee, rtm)
+		bot.notifyNewMR(mr, assignee, slackChans)
 
 		// TODO: save notification thread ID for any updates
 	case MR_ACTION_UPDATED:
@@ -118,13 +120,12 @@ func mergeRequest(gl *gitlab.Client, rtm *slack.RTM, mr *gitlab.MergeEvent) {
 	case MR_ACTION_MERGED:
 	case MR_ACTION_UNAPPROVED:
 	case MR_ACTION_CLOSED:
-	case MR_ACTION_REOPENED:
 	}
 
 }
 
-func notifyNewMR(mr *gitlab.MergeEvent, err error, gl *gitlab.Client, assignee string, rtm *slack.RTM) {
-	user, _, err := gl.Users.GetUser(mr.ObjectAttributes.AuthorID)
+func (bot bot) notifyNewMR(mr *gitlab.MergeEvent,assignee string, slackChans []string) {
+	user, _, err := bot.gl.Users.GetUser(mr.ObjectAttributes.AuthorID)
 	if err != nil {
 		logrus.WithError(err).Error("unable to see who opened the merge request. continuing...")
 	}
@@ -136,17 +137,16 @@ func notifyNewMR(mr *gitlab.MergeEvent, err error, gl *gitlab.Client, assignee s
 
 	var msg string
 	if isWIP {
-		msg = fmt.Sprintf("New WIP merge request in %s from %s has been assigned to %s.  See %s for details.", repo, author, assignee, url)
+		msg = fmt.Sprintf("New WIP merge request in `%s` from %s has been assigned to %s.  See %s for details.", repo, author, assignee, url)
 	} else {
-		msg = fmt.Sprintf("New merge request in %s from %s has been assigned to %s.  See %s for details.", repo, author, assignee, url)
+		msg = fmt.Sprintf("New merge request in `%s` from %s has been assigned to %s.  See %s for details.", repo, author, assignee, url)
 	}
 	logrus.Info(msg)
 
-	targetChannel, ok := repoSlackChannelMapping[mr.Project.ID]
-	if !ok {
-		logrus.Warnf("No slack channel configured for project ID %d", mr.Project.ID)
-	} else if rtm != nil {
-		rtm.SendMessage(rtm.NewOutgoingMessage(msg, targetChannel))
+	if bot.rtm != nil {
+		for _, slackChan := range slackChans {
+			bot.rtm.SendMessage(bot.rtm.NewOutgoingMessage(msg, slackChan))
+		}
 	}
 }
 
@@ -165,6 +165,7 @@ func maybeAssignMaintainer(gl *gitlab.Client, mr *gitlab.MergeEvent) (string, er
 	}
 	maintainer := maintainers[rand.Intn(len(maintainers))]
 
+	// not assigned
 	if mr.ObjectAttributes.AssigneeID == 0 {
 		_, _, err = gl.MergeRequests.UpdateMergeRequest(mr.Project.ID, mr.ObjectAttributes.IID, &gitlab.UpdateMergeRequestOptions{
 			AssigneeID: &maintainer.ID,
@@ -183,6 +184,8 @@ func maybeAssignMaintainer(gl *gitlab.Client, mr *gitlab.MergeEvent) (string, er
 			_, _, err = gl.MergeRequests.UpdateMergeRequest(mr.Project.ID, mr.ObjectAttributes.IID, &gitlab.UpdateMergeRequestOptions{
 				AssigneeID: &maintainer.ID,
 			})
+			return maintainer.Name, err
+		} else {
 			return maintainer.Name, err
 		}
 	}
